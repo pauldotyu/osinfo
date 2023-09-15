@@ -3,7 +3,7 @@ name: container-image
 on:
   push:
     branches:
-      - 'main'
+      - 'gh-action-secure'
 
 permissions:
   id-token: write
@@ -34,3 +34,15 @@ jobs:
           push: true
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+      - name: Pull image
+        run: docker pull ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.12.0
+        with:
+          image-ref: ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+          format: json
+          output: patch.json
+          exit-code: 0
+          ignore-unfixed: true
+          vuln-type: os
+          severity: 'CRITICAL,HIGH'
