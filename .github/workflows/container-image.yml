@@ -13,36 +13,76 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Login to Azure
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Login to Azure Container Registry
-        run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      - name: Build image and push to registry
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
-      - name: Pull image
-        run: docker pull ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.12.0
-        with:
-          image-ref: ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
-          format: json
-          output: patch.json
-          exit-code: 0
-          ignore-unfixed: true
-          vuln-type: os
-          severity: 'CRITICAL,HIGH'
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    
+    - name: Login to Azure Container Registry
+      run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build image and push to registry
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+
+    - name: Pull image
+      run: |
+        docker pull ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+        docker manifest inspect ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }}
+
+    - name: Generate Trivy Report
+      uses: aquasecurity/trivy-action@0.12.0
+      with:
+        scan-type: 'image'
+        format: 'json'
+        output: 'report.json'
+        ignore-unfixed: true
+        vuln-type: 'os'
+        image-ref: ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }} #'docker.io/library/nginx:1.21.6'
+
+    - name: Check Vuln Count
+      id: vuln_count
+      run: |
+        report_file="report.json"
+        vuln_count=$(jq '.Results | length' "$report_file")
+        echo "vuln_count=$vuln_count" >> $GITHUB_OUTPUT
+        echo "Vulnerabilities found: ${vuln_count} "
+      
+    - name: Enable anonymous pull
+      run: |
+        az acr update --name ${{ secrets.ACR_LOGIN_SERVER }} --anonymous-pull-enabled
+        
+    - name: Copa Action
+      if: steps.vuln_count.outputs.vuln_count != '0'
+      id: copa
+      uses: project-copacetic/copa-action@v1.0.0
+      with:
+        image: ${{ secrets.ACR_LOGIN_SERVER }}/osinfo:${{ github.sha }} #'docker.io/library/nginx:1.21.6'
+        image-report: 'report.json'
+        patched-tag: 'patched'
+        buildkit-version: 'v0.11.6'
+        # optional, default is latest
+        copa-version: '0.3.0'
+
+    - name: Disable anonymous pull
+      run: |
+        az acr update --name ${{ secrets.ACR_LOGIN_SERVER }} --anonymous-pull-enabled false
+
+    - name: Docker Push Patched Image
+      if: steps.copa.conclusion == 'success'
+      run: |
+        docker push ${{ steps.copa.outputs.patched-image }}
